@@ -531,7 +531,36 @@ def _parse_job_page(html: str, job_id: int, url: str) -> dict | None:
     }
 
 
+# Unicode letters only (no digits, no underscore, no punctuation) — this keeps
+# ASCII plus accented Turkish/German/Spanish/etc. letters (ş, ğ, ı, ö, ü, ç,
+# ä, ß, ñ, á, é, í, ó, ú, ...) while stripping parentheses, commas, colons,
+# quotes, and the like.
+_WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
+
+
+def _tokenize_words(text: str) -> list[str]:
+    """Split text into lowercase words, dropping digits and punctuation."""
+    return [w.lower() for w in _WORD_RE.findall(text or "")]
+
+
 def _check_keywords(text: str, keywords: list[str]) -> list[str]:
-    """Return which keywords appear in text (case-insensitive)."""
-    text_lower = text.lower()
-    return [kw for kw in keywords if kw.lower() in text_lower]
+    """
+    Return which keywords are exact whole-word (or whole-phrase) matches in
+    text — e.g. keyword "rust" matches "I love Rust!" but not "I trust you".
+    """
+    words = _tokenize_words(text)
+    word_set = set(words)
+    joined = " " + " ".join(words) + " "
+
+    matched = []
+    for kw in keywords:
+        kw_words = _tokenize_words(kw)
+        if not kw_words:
+            continue
+        if len(kw_words) == 1:
+            if kw_words[0] in word_set:
+                matched.append(kw)
+        elif f" {' '.join(kw_words)} " in joined:
+            matched.append(kw)
+
+    return matched
