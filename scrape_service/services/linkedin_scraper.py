@@ -31,6 +31,7 @@ from django.utils import timezone as django_tz
 
 from ..models import Job, Keyword, ScrapeConfig, ScrapeLog
 from ..telegram import send_telegram_message, build_job_message
+from .detectors import check_filters, detect_country, detect_language
 
 logger = logging.getLogger(__name__)
 
@@ -97,8 +98,11 @@ def run_scraper():
     keywords = list(Keyword.objects.values_list("word", flat=True))
     stats = {"ids_checked": 0, "jobs_found": 0, "jobs_new": 0, "alerts_sent": 0}
 
+    logger.info("batch start: checking IDs %s..%s (log #%s)", id_from, id_to, log.pk)
+
     try:
         for job_id in range(id_from, id_to + 1):
+            logger.info("probing job_id=%s", job_id)
             result = _probe_job_id(job_id, keywords)
             stats["ids_checked"] += 1
 
@@ -106,8 +110,14 @@ def run_scraper():
                 stats["jobs_found"] += 1
                 if result["is_new"]:
                     stats["jobs_new"] += 1
+                    logger.info("job_id=%s is NEW and saved", job_id)
+                else:
+                    logger.info("job_id=%s already in DB, skipped insert", job_id)
                 if result["alert_sent"]:
                     stats["alerts_sent"] += 1
+                    logger.info("job_id=%s Telegram alert sent", job_id)
+            else:
+                logger.info("job_id=%s does not exist / no result", job_id)
 
             # Always advance current_id so we don't re-check on next run
             config.current_id = job_id
@@ -115,9 +125,12 @@ def run_scraper():
 
             # Base delay + random jitter to look less like a bot
             base_delay = getattr(settings, "SCRAPER_REQUEST_DELAY", 3)
-            time.sleep(base_delay + random.uniform(0.5, 2.5))
+            delay = base_delay + random.uniform(0.5, 2.5)
+            logger.info("sleeping %.2fs before next request", delay)
+            time.sleep(delay)
 
         log.status = "success"
+        logger.info("batch finished successfully: %s", stats)
 
     except BlockedByLinkedIn as exc:
         logger.error("Batch stopped early — blocked by LinkedIn: %s", exc)
@@ -167,10 +180,21 @@ def _probe_job_id(job_id: int, keywords: list[str]) -> dict:
     if Job.objects.filter(linkedin_id=job_id).exists():
         return {"exists": True, "is_new": False, "alert_sent": False}
 
-    # Check keywords
-    full_text = f"{data['title']} {data['company']} {data['description']}"
-    matched = _check_keywords(full_text, keywords)
+    country = detect_country(data["location"])
+    language = detect_language(data["description"] or data["title"])
+    poster_name = data["poster_name"]
+    poster_profile_url = data["poster_profile_url"]
+    logger.info(
+        "job_id=%s detected country=%s language=%s poster=%s",
+        job_id, country, language, poster_name or poster_profile_url or None,
+    )
 
+    allowed, filter_reason = check_filters(country, language, poster_name, poster_profile_url)
+
+    logger.info(
+        'inserting Job row for linkedin_id=%s: "%s" at %s',
+        job_id, data["title"], data["company"],
+    )
     job = Job.objects.create(
         linkedin_id=job_id,
         title=data["title"],
@@ -181,17 +205,37 @@ def _probe_job_id(job_id: int, keywords: list[str]) -> dict:
         description=data["description"],
         employment_type=data["employment_type"],
         seniority_level=data["seniority_level"],
+        country=country or "",
+        language=language or "",
+        poster_name=poster_name,
+        poster_profile_url=poster_profile_url,
+        is_filtered=not allowed,
+        filter_reason=filter_reason,
     )
+    logger.info("Job row inserted (pk=%s)", job.pk)
+
+    if not allowed:
+        logger.info("job_id=%s filtered out: %s", job_id, filter_reason)
+        return {"exists": True, "is_new": True, "alert_sent": False}
+
+    # Check keywords
+    full_text = f"{data['title']} {data['company']} {data['description']}"
+    matched = _check_keywords(full_text, keywords)
 
     alert_sent = False
     if matched:
+        logger.info("job_id=%s matched keywords: %s", job_id, matched)
         kw_objects = Keyword.objects.filter(word__in=matched)
         job.matched_keywords.set(kw_objects)
         message = build_job_message(job, matched)
+        logger.info("sending Telegram API request for job_id=%s", job_id)
         if send_telegram_message(message):
             job.telegram_sent = True
             job.telegram_sent_at = django_tz.now()
             alert_sent = True
+            logger.info("Telegram API request succeeded for job_id=%s", job_id)
+        else:
+            logger.warning("Telegram API request FAILED for job_id=%s", job_id)
         job.save()
     else:
         job.save()
@@ -368,6 +412,21 @@ def _parse_job_page(html: str, job_id: int, url: str) -> dict | None:
             elif "seniority" in lbl:
                 seniority_level = val
 
+    # ── Job poster (only present when LinkedIn renders a "message the job
+    #    poster" card — many listings don't have one, so this is best-effort) ──
+    poster_name = ""
+    poster_profile_url = ""
+    recruiter_section = soup.select_one("div.message-the-recruiter")
+    if recruiter_section:
+        name_el = recruiter_section.select_one("h3.base-main-card__title")
+        if name_el:
+            poster_name = name_el.get_text(strip=True)
+
+        link_el = recruiter_section.select_one("a.base-card__full-link")
+        if link_el:
+            href = str(link_el.get("href") or "")
+            poster_profile_url = href.split("?")[0] if href else ""
+
     return {
         "title": title,
         "company": company or "Unknown Company",
@@ -376,6 +435,8 @@ def _parse_job_page(html: str, job_id: int, url: str) -> dict | None:
         "description": description,
         "employment_type": employment_type,
         "seniority_level": seniority_level,
+        "poster_name": poster_name,
+        "poster_profile_url": poster_profile_url,
     }
 
 

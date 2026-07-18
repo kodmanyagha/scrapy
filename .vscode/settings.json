@@ -6,5 +6,6 @@
     "editor.wordBasedSuggestions": "currentDocument",
     "editor.tabSize": 4
   },
+  "python.defaultInterpreterPath": "./.venv/bin/python",
   "editor.tabSize": 2
 }

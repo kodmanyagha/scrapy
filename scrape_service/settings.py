@@ -32,6 +32,8 @@ DEBUG = True
 
 ALLOWED_HOSTS = ["local-8000.host"]
 
+CSRF_TRUSTED_ORIGINS = ["https://local-8000.host", "http://local-8000.host"]
+
 
 # Application definition
 
@@ -131,3 +133,21 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID_HERE")
 # ─── Scraper ──────────────────────────────────────────────────────────────────
 # How many seconds to wait between page requests (be polite to LinkedIn)
 SCRAPER_REQUEST_DELAY = 5
+
+# ─── Logging ──────────────────────────────────────────────────────────────────
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+        },
+    },
+    "loggers": {
+        "scrape_service": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+    },
+}

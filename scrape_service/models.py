@@ -53,7 +53,31 @@ class Job(models.Model):
     employment_type = models.CharField(max_length=100, blank=True)
     seniority_level = models.CharField(max_length=100, blank=True)
 
+    country = models.CharField(
+        max_length=10,
+        blank=True,
+        help_text="ISO 3166-1 alpha-2 country code detected from the job location",
+    )
+    language = models.CharField(
+        max_length=10,
+        blank=True,
+        help_text="ISO 639-1 code detected from the job description via Hugging Face",
+    )
+
+    poster_name = models.CharField(
+        max_length=200, blank=True, help_text="Name of the job poster/recruiter, if shown"
+    )
+    poster_profile_url = models.URLField(
+        max_length=600, blank=True, help_text="LinkedIn profile URL of the job poster, if shown"
+    )
+
     matched_keywords = models.ManyToManyField(Keyword, blank=True, related_name="jobs")
+
+    is_filtered = models.BooleanField(
+        default=False,
+        help_text="True if this job was excluded by a country/language/poster whitelist or blacklist rule",
+    )
+    filter_reason = models.CharField(max_length=200, blank=True)
 
     telegram_sent = models.BooleanField(default=False)
     telegram_sent_at = models.DateTimeField(null=True, blank=True)
@@ -70,6 +94,89 @@ class Job(models.Model):
     @property
     def has_keyword_match(self):
         return self.matched_keywords.exists()
+
+
+class CountryRule(models.Model):
+    """Whitelist/blacklist entry for a country. Blacklist always wins over whitelist."""
+
+    LIST_TYPE_CHOICES = [
+        ("whitelist", "Whitelist (only allow)"),
+        ("blacklist", "Blacklist (always block)"),
+    ]
+
+    country = models.CharField(
+        max_length=100,
+        help_text='Country name as detected, e.g. "Turkey", "United States", "India"',
+    )
+    list_type = models.CharField(max_length=10, choices=LIST_TYPE_CHOICES)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("country", "list_type")
+        ordering = ["list_type", "country"]
+        verbose_name = "Country Rule"
+        verbose_name_plural = "Country Rules"
+
+    def __str__(self):
+        return f"{self.get_list_type_display()}: {self.country}"
+
+
+class LanguageRule(models.Model):
+    """Whitelist/blacklist entry for a language. Blacklist always wins over whitelist."""
+
+    LIST_TYPE_CHOICES = [
+        ("whitelist", "Whitelist (only allow)"),
+        ("blacklist", "Blacklist (always block)"),
+    ]
+
+    language_code = models.CharField(
+        max_length=10, help_text='ISO 639-1 code, e.g. "en", "tr"'
+    )
+    list_type = models.CharField(max_length=10, choices=LIST_TYPE_CHOICES)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("language_code", "list_type")
+        ordering = ["list_type", "language_code"]
+        verbose_name = "Language Rule"
+        verbose_name_plural = "Language Rules"
+
+    def __str__(self):
+        return f"{self.get_list_type_display()}: {self.language_code}"
+
+
+class PosterRule(models.Model):
+    """
+    Whitelist/blacklist entry for a job poster (recruiter). Blacklist always
+    wins over whitelist. Match against either their name or LinkedIn profile
+    URL — whichever you provide.
+    """
+
+    LIST_TYPE_CHOICES = [
+        ("whitelist", "Whitelist (only allow)"),
+        ("blacklist", "Blacklist (always block)"),
+    ]
+
+    poster_name = models.CharField(
+        max_length=200,
+        blank=True,
+        help_text='Substring to match against the poster name, case-insensitive (e.g. "turing" matches "Turing Recruiting Team")',
+    )
+    poster_profile_url = models.URLField(
+        max_length=600,
+        blank=True,
+        help_text="LinkedIn profile URL of the poster, e.g. https://www.linkedin.com/in/johndoe",
+    )
+    list_type = models.CharField(max_length=10, choices=LIST_TYPE_CHOICES)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["list_type", "poster_name"]
+        verbose_name = "Poster Rule"
+        verbose_name_plural = "Poster Rules"
+
+    def __str__(self):
+        return f"{self.get_list_type_display()}: {self.poster_name or self.poster_profile_url}"
 
 
 class ScrapeLog(models.Model):

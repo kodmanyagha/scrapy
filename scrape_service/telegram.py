@@ -41,13 +41,14 @@ def send_telegram_message(text: str, parse_mode: str = "HTML") -> bool:
         "chat_id": chat_id,
         "text": text,
         "parse_mode": parse_mode,
-        "disable_web_page_preview": False,
+        "disable_web_page_preview": True,
     }
 
+    logger.info("POST %s chat_id=%s", url, chat_id)
     try:
         resp = requests.post(url, json=payload, timeout=10)
         resp.raise_for_status()
-        logger.info("Telegram notification sent.")
+        logger.info("Telegram notification sent (status=%s).", resp.status_code)
         return True
     except requests.RequestException as exc:
         logger.error("Failed to send Telegram message: %s", exc)
@@ -73,12 +74,20 @@ def build_job_message(job, matched_keywords: list[str]) -> str:
         lines.append(f"📊 {_esc(job.seniority_level)}")
     if job.posted_date:
         lines.append(f"📅 {_esc(job.posted_date)}")
+    if job.poster_name:
+        if job.poster_profile_url:
+            lines.append(
+                f'🙋 Posted by <a href="{job.poster_profile_url}">{_esc(job.poster_name)}</a>'
+            )
+        else:
+            lines.append(f"🙋 Posted by {_esc(job.poster_name)}")
 
     lines += [
         "",
         f"🔑 Matched keywords: {kw_tags}",
         "",
-        f'🔗 <a href="{job.url}">View on LinkedIn</a>',
+        f"🔗 {job.url}",
+        # f'🔗 <a href="{job.url}">View on LinkedIn</a>',
     ]
 
     return "\n".join(lines)
