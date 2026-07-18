@@ -6,7 +6,6 @@ from .models import (
     Keyword,
     LanguageRule,
     PosterRule,
-    ScrapeConfig,
     ScrapeLog,
 )
 
@@ -19,29 +18,20 @@ class KeywordAdmin(admin.ModelAdmin):
 
 @admin.register(CountryRule)
 class CountryRuleAdmin(admin.ModelAdmin):
-    list_display = ("id", "country", "list_type", "created_at")
-    list_filter = ("list_type",)
+    list_display = ("id", "country", "created_at")
     search_fields = ("country",)
 
 
 @admin.register(LanguageRule)
 class LanguageRuleAdmin(admin.ModelAdmin):
-    list_display = ("id", "language_code", "list_type", "created_at")
-    list_filter = ("list_type",)
+    list_display = ("id", "language_code", "created_at")
     search_fields = ("language_code",)
 
 
 @admin.register(PosterRule)
 class PosterRuleAdmin(admin.ModelAdmin):
-    list_display = ("id", "poster_name", "poster_profile_url", "list_type", "created_at")
-    list_filter = ("list_type",)
-    search_fields = ("poster_name", "poster_profile_url")
-
-
-@admin.register(ScrapeConfig)
-class ScrapeConfigAdmin(admin.ModelAdmin):
-    list_display = ("id", "start_id", "current_id", "batch_size", "is_active", "updated_at")
-    list_filter = ("is_active",)
+    list_display = ("id", "poster_name", "created_at")
+    search_fields = ("poster_name",)
 
 
 @admin.register(Job)
@@ -59,18 +49,14 @@ class JobAdmin(admin.ModelAdmin):
     def blacklist_poster(self, request, queryset):
         created = 0
         for job in queryset:
-            if not job.poster_name and not job.poster_profile_url:
+            if not job.poster_name:
                 continue
-            _, was_created = PosterRule.objects.get_or_create(
-                poster_name=job.poster_name,
-                poster_profile_url=job.poster_profile_url,
-                list_type="blacklist",
-            )
+            _, was_created = PosterRule.objects.get_or_create(poster_name=job.poster_name)
             created += int(was_created)
         self.message_user(request, f"Blacklisted {created} poster(s).")
 
 
 @admin.register(ScrapeLog)
 class ScrapeLogAdmin(admin.ModelAdmin):
-    list_display = ("id", "config", "status", "id_from", "id_to", "ids_checked", "jobs_found", "jobs_new", "alerts_sent", "started_at")
+    list_display = ("id", "status", "id_from", "id_to", "ids_checked", "jobs_found", "jobs_new", "alerts_sent", "started_at")
     list_filter = ("status",)

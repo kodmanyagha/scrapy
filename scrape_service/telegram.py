@@ -75,12 +75,7 @@ def build_job_message(job, matched_keywords: list[str]) -> str:
     if job.posted_date:
         lines.append(f"📅 {_esc(job.posted_date)}")
     if job.poster_name:
-        if job.poster_profile_url:
-            lines.append(
-                f'🙋 Posted by <a href="{job.poster_profile_url}">{_esc(job.poster_name)}</a>'
-            )
-        else:
-            lines.append(f"🙋 Posted by {_esc(job.poster_name)}")
+        lines.append(f"🙋 Posted by {_esc(job.poster_name)}")
 
     lines += [
         "",

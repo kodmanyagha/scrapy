@@ -8,15 +8,14 @@ Strategy
 LinkedIn job detail pages are publicly accessible at:
     https://www.linkedin.com/jobs/view/<JOB_ID>/
 
-Job IDs are sequential integers. We start from a user-specified ID and probe
-each subsequent ID one by one:
+Job IDs are sequential integers. We probe each subsequent ID one by one:
   - HTTP 200  → job is live → parse and save
   - HTTP 404  → job doesn't exist or was removed → skip
   - HTTP 429  → rate-limited → back off and retry
   - Other     → log and skip
 
-The last checked ID is persisted in ScrapeConfig.current_id so runs resume
-correctly even after interruption.
+Runs resume from MAX(Job.linkedin_id) + 1 — no separate position tracker is
+needed since every job we've successfully scraped is already in the DB.
 """
 
 import logging
@@ -27,15 +26,22 @@ import random
 import requests
 from bs4 import BeautifulSoup
 from django.conf import settings
+from django.db import models
 from django.utils import timezone as django_tz
 
-from ..models import Job, Keyword, ScrapeConfig, ScrapeLog
+from ..models import Job, Keyword, ScrapeLog
 from ..telegram import send_telegram_message, build_job_message
 from .detectors import check_filters, detect_country, detect_language
 
 logger = logging.getLogger(__name__)
 
 JOB_URL = "https://www.linkedin.com/jobs/view/{}/"
+
+# LinkedIn's public job-search endpoint. f_TPR=r<seconds> filters to postings
+# from the last N seconds; sortBy=DD sorts most-recent-first. Used to discover
+# the current job-ID "frontier" so sequential iteration can resync instead of
+# grinding through unassigned ID space (all-404s) when it runs past it.
+SEARCH_URL = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
 
 # Rotate through several real browser User-Agent strings to avoid fingerprinting
 USER_AGENTS = [
@@ -74,73 +80,158 @@ RATE_LIMIT_BACKOFF = 60  # seconds to wait after a 429 or 999
 # ─── Public API ───────────────────────────────────────────────────────────────
 
 
-def run_scraper():
+def fetch_latest_job_id(minutes: int = 2) -> int | None:
     """
-    Pick the active ScrapeConfig, iterate IDs for one batch, save results.
+    Discover the current LinkedIn job-ID frontier by querying the public job
+    search for postings from the last `minutes` minutes, sorted most-recent
+    first, and returning the highest job ID seen. Returns None on failure or
+    if no postings were found in that window.
+    """
+
+    params = {"f_TPR": f"r{minutes * 60}", "sortBy": "DD", "start": 0}
+    try:
+        resp = requests.get(
+            SEARCH_URL, params=params, headers=_get_headers(), timeout=20
+        )
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        logger.warning("Frontier discovery request failed: %s", exc)
+        return None
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    ids = []
+    for card in soup.select("li div[data-entity-urn]"):
+        urn = str(card.get("data-entity-urn") or "")
+        if urn.startswith("urn:li:jobPosting:"):
+            try:
+                ids.append(int(urn.rsplit(":", 1)[-1]))
+            except ValueError:
+                continue
+
+    if not ids:
+        logger.warning(
+            "Frontier discovery found no postings in the last %d minutes", minutes
+        )
+        return None
+
+    frontier = max(ids)
+    logger.info("Discovered frontier job_id=%s (last %d minutes)", frontier, minutes)
+    return frontier
+
+
+def run_scraper(start_id: int | None = None, limit: int | None = None) -> dict:
+    """
+    Probe LinkedIn job IDs sequentially, resuming from MAX(Job.linkedin_id) + 1
+    unless `start_id` overrides it. If `limit` is None, runs until interrupted
+    (Ctrl+C) — used for --continuous mode.
+
+    Every SCRAPER_FRONTIER_CHECK_INTERVAL ids, checks LinkedIn's real current
+    job-ID frontier (via fetch_latest_job_id). If we're still behind it, keep
+    going; if we've caught up, wait SCRAPER_CAUGHT_UP_WAIT_SECONDS before
+    continuing, so we're not hammering LinkedIn while waiting for new
+    postings to appear.
+
     Returns a stats dict.
     """
-    try:
-        config = ScrapeConfig.objects.filter(is_active=True).latest("created_at")
-    except ScrapeConfig.DoesNotExist:
-        logger.warning("No active ScrapeConfig found. Create one in the admin panel.")
-        return {"error": "No active config"}
-
-    id_from = config.current_id + 1
-    id_to = id_from + config.batch_size - 1
-
-    log = ScrapeLog.objects.create(
-        config=config,
-        status="running",
-        id_from=id_from,
-        id_to=id_to,
-    )
+    if start_id is not None:
+        job_id = start_id
+    else:
+        last_id = Job.objects.aggregate(models.Max("linkedin_id"))["linkedin_id__max"]
+        if last_id is None:
+            logger.warning("No jobs scraped yet. Provide --start <ID> to begin.")
+            return {
+                "error": "No jobs scraped yet. Use --start <ID> to set a starting job ID."
+            }
+        job_id = last_id + 1
 
     keywords = list(Keyword.objects.values_list("word", flat=True))
     stats = {"ids_checked": 0, "jobs_found": 0, "jobs_new": 0, "alerts_sent": 0}
 
-    logger.info("batch start: checking IDs %s..%s (log #%s)", id_from, id_to, log.pk)
+    check_interval = getattr(settings, "SCRAPER_FRONTIER_CHECK_INTERVAL", 10)
+    wait_seconds = getattr(settings, "SCRAPER_CAUGHT_UP_WAIT_SECONDS", 30)
+
+    log = ScrapeLog.objects.create(status="running", id_from=job_id, id_to=job_id)
+
+    logger.info("scrape start: job_id=%s (limit=%s, log #%s)", job_id, limit, log.pk)
 
     try:
-        for job_id in range(id_from, id_to + 1):
-            logger.info("probing job_id=%s", job_id)
-            result = _probe_job_id(job_id, keywords)
-            stats["ids_checked"] += 1
+        try:
+            while limit is None or stats["ids_checked"] < limit:
+                logger.info("probing job_id=%s", job_id)
+                result = _probe_job_id(job_id, keywords)
+                stats["ids_checked"] += 1
 
-            if result["exists"]:
-                stats["jobs_found"] += 1
-                if result["is_new"]:
-                    stats["jobs_new"] += 1
-                    logger.info("job_id=%s is NEW and saved", job_id)
+                if result["exists"]:
+                    stats["jobs_found"] += 1
+                    if result["is_new"]:
+                        stats["jobs_new"] += 1
+                        logger.info("job_id=%s is NEW and saved", job_id)
+                    else:
+                        logger.info("job_id=%s already in DB, skipped insert", job_id)
+                    if result["alert_sent"]:
+                        stats["alerts_sent"] += 1
+                        logger.info("job_id=%s Telegram alert sent", job_id)
                 else:
-                    logger.info("job_id=%s already in DB, skipped insert", job_id)
-                if result["alert_sent"]:
-                    stats["alerts_sent"] += 1
-                    logger.info("job_id=%s Telegram alert sent", job_id)
-            else:
-                logger.info("job_id=%s does not exist / no result", job_id)
+                    logger.info("job_id=%s does not exist / no result", job_id)
 
-            # Always advance current_id so we don't re-check on next run
-            config.current_id = job_id
-            config.save(update_fields=["current_id", "updated_at"])
+                log.id_to = job_id
+                log.ids_checked = stats["ids_checked"]
+                log.jobs_found = stats["jobs_found"]
+                log.jobs_new = stats["jobs_new"]
+                log.alerts_sent = stats["alerts_sent"]
+                log.save(
+                    update_fields=[
+                        "id_to",
+                        "ids_checked",
+                        "jobs_found",
+                        "jobs_new",
+                        "alerts_sent",
+                    ]
+                )
 
-            # Base delay + random jitter to look less like a bot
-            base_delay = getattr(settings, "SCRAPER_REQUEST_DELAY", 3)
-            delay = base_delay + random.uniform(0.5, 2.5)
-            logger.info("sleeping %.2fs before next request", delay)
-            time.sleep(delay)
+                if stats["ids_checked"] % check_interval == 0:
+                    frontier = fetch_latest_job_id()
+                    if frontier is not None:
+                        if job_id < frontier:
+                            logger.info(
+                                "frontier check: current=%s < frontier=%s — continuing",
+                                job_id,
+                                frontier,
+                            )
+                        else:
+                            logger.info(
+                                "frontier check: current=%s >= frontier=%s — caught up, waiting %ss",
+                                job_id,
+                                frontier,
+                                wait_seconds,
+                            )
+                            time.sleep(wait_seconds)
 
+                job_id += 1
+
+                # Base delay + random jitter to look less like a bot
+                base_delay = getattr(settings, "SCRAPER_REQUEST_DELAY", 3)
+                delay = base_delay + random.uniform(0.5, 2.5)
+                logger.info("sleeping %.2fs before next request", delay)
+                time.sleep(delay)
+
+            log.status = "success"
+            logger.info("scrape finished: %s", stats)
+
+        except BlockedByLinkedIn as exc:
+            logger.error("Scrape stopped early — blocked by LinkedIn: %s", exc)
+            log.status = "failed"
+            log.error_message = str(exc)
+
+        except Exception as exc:
+            logger.exception("Scraper run failed at job_id=%s", job_id)
+            log.status = "failed"
+            log.error_message = str(exc)
+
+    except KeyboardInterrupt:
+        logger.warning("Scrape interrupted by user — progress saved.")
         log.status = "success"
-        logger.info("batch finished successfully: %s", stats)
-
-    except BlockedByLinkedIn as exc:
-        logger.error("Batch stopped early — blocked by LinkedIn: %s", exc)
-        log.status = "failed"
-        log.error_message = str(exc)
-
-    except Exception as exc:
-        logger.exception("Scraper run failed at job_id=%s", job_id)
-        log.status = "failed"
-        log.error_message = str(exc)
+        raise
 
     finally:
         log.ids_checked = stats["ids_checked"]
@@ -183,17 +274,18 @@ def _probe_job_id(job_id: int, keywords: list[str]) -> dict:
     country = detect_country(data["location"])
     language = detect_language(data["description"] or data["title"])
     poster_name = data["poster_name"]
-    poster_profile_url = data["poster_profile_url"]
     logger.info(
         "job_id=%s detected country=%s language=%s poster=%s",
-        job_id, country, language, poster_name or poster_profile_url or None,
+        job_id, country, language, poster_name or None,
     )
 
-    allowed, filter_reason = check_filters(country, language, poster_name, poster_profile_url)
+    allowed, filter_reason = check_filters(country, language, poster_name)
 
     logger.info(
         'inserting Job row for linkedin_id=%s: "%s" at %s',
-        job_id, data["title"], data["company"],
+        job_id,
+        data["title"],
+        data["company"],
     )
     job = Job.objects.create(
         linkedin_id=job_id,
@@ -208,7 +300,6 @@ def _probe_job_id(job_id: int, keywords: list[str]) -> dict:
         country=country or "",
         language=language or "",
         poster_name=poster_name,
-        poster_profile_url=poster_profile_url,
         is_filtered=not allowed,
         filter_reason=filter_reason,
     )
@@ -412,20 +503,21 @@ def _parse_job_page(html: str, job_id: int, url: str) -> dict | None:
             elif "seniority" in lbl:
                 seniority_level = val
 
-    # ── Job poster (only present when LinkedIn renders a "message the job
-    #    poster" card — many listings don't have one, so this is best-effort) ──
+    # ── Job poster ─────────────────────────────────────────────────────────────
+    # If LinkedIn renders a "message the job poster" card, that's an individual
+    # recruiter's name. Most listings don't have one — LinkedIn's own job-page
+    # <title> always reads "<poster> hiring <title> in <location>", and when
+    # there's no individual recruiter, <poster> there is just the company name.
+    # So: prefer the individual's name, fall back to the company.
     poster_name = ""
-    poster_profile_url = ""
     recruiter_section = soup.select_one("div.message-the-recruiter")
     if recruiter_section:
         name_el = recruiter_section.select_one("h3.base-main-card__title")
         if name_el:
             poster_name = name_el.get_text(strip=True)
 
-        link_el = recruiter_section.select_one("a.base-card__full-link")
-        if link_el:
-            href = str(link_el.get("href") or "")
-            poster_profile_url = href.split("?")[0] if href else ""
+    if not poster_name:
+        poster_name = company
 
     return {
         "title": title,
@@ -436,7 +528,6 @@ def _parse_job_page(html: str, job_id: int, url: str) -> dict | None:
         "employment_type": employment_type,
         "seniority_level": seniority_level,
         "poster_name": poster_name,
-        "poster_profile_url": poster_profile_url,
     }
 
 

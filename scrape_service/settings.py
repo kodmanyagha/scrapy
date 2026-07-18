@@ -133,6 +133,15 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID_HERE")
 # ─── Scraper ──────────────────────────────────────────────────────────────────
 # How many seconds to wait between page requests (be polite to LinkedIn)
 SCRAPER_REQUEST_DELAY = 5
+# Default number of IDs to probe per run when --continuous isn't used
+SCRAPER_BATCH_SIZE = 50
+
+# Every N ids probed, check LinkedIn's real current job-ID frontier (via the
+# public job search, "posted in the last few minutes" sorted by most recent).
+SCRAPER_FRONTIER_CHECK_INTERVAL = 10
+# If we've caught up to the frontier, wait this many seconds before probing
+# again instead of hammering LinkedIn while waiting for new postings.
+SCRAPER_CAUGHT_UP_WAIT_SECONDS = 30
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 LOGGING = {

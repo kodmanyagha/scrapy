@@ -3,16 +3,16 @@ scrape_service/services/detectors.py
 ─────────────────────────────────────
 Country detection (parsed from the LinkedIn "location" string via pycountry)
 and language detection (offline, via py3langid — no network call, so it can't
-fail from API downtime/rate limits/DNS issues), plus whitelist/blacklist
-filtering against CountryRule / LanguageRule / PosterRule.
-
-Filtering rule: blacklist always wins. If a whitelist exists for a field and
-the detected value isn't in it, the job is rejected. If a value can't be
-detected at all, it is NOT filtered out (fail open).
+fail from API downtime/rate limits/DNS issues), plus filtering against
+CountryRule / LanguageRule / PosterRule:
+  - CountryRule and PosterRule are blacklists — everything is allowed except
+    what's listed.
+  - LanguageRule is a whitelist — only listed languages are allowed (if the
+    list is empty, all languages are allowed).
+If a value can't be detected at all, it is NOT filtered out (fail open).
 """
 
 import logging
-from urllib.parse import urlparse
 
 import py3langid as langid
 import pycountry
@@ -101,100 +101,37 @@ def check_filters(
     country_code: str | None,
     language: str | None,
     poster_name: str | None = None,
-    poster_profile_url: str | None = None,
 ) -> tuple[bool, str]:
     """
     Check a detected alpha-2 country code, ISO 639-1 language code, and job
-    poster against CountryRule/LanguageRule/PosterRule.
-    Returns (allowed, reason); reason is empty when allowed.
+    poster name against CountryRule (blacklist) / LanguageRule (whitelist) /
+    PosterRule (blacklist). Returns (allowed, reason); reason is empty when allowed.
     """
-    allowed, reason = _check_rules(
-        country_code,
-        list(CountryRule.objects.all()),
-        "country",
-        lambda r: _resolve_country_code(r.country),
-    )
-    if not allowed:
-        return False, reason
+    if country_code is not None:
+        for rule in CountryRule.objects.all():
+            if _resolve_country_code(rule.country) == country_code:
+                return False, f"country '{country_code}' is blacklisted"
 
-    allowed, reason = _check_rules(
-        language,
-        list(LanguageRule.objects.all()),
-        "language",
-        lambda r: r.language_code.strip().lower(),
-    )
-    if not allowed:
-        return False, reason
+    if language is not None:
+        whitelist = list(LanguageRule.objects.values_list("language_code", flat=True))
+        if whitelist and language.strip().lower() not in (w.strip().lower() for w in whitelist):
+            return False, f"language '{language}' is not in the whitelist"
 
-    allowed, reason = check_poster(poster_name, poster_profile_url)
+    allowed, reason = check_poster(poster_name)
     if not allowed:
         return False, reason
 
     return True, ""
 
 
-def check_poster(poster_name: str | None, poster_profile_url: str | None) -> tuple[bool, str]:
-    """
-    Check a job poster's name/profile URL against PosterRule. A rule matches
-    if either its name or its profile URL matches the job's (whichever fields
-    are set on both sides).
-    """
+def check_poster(poster_name: str | None) -> tuple[bool, str]:
+    """Check a job poster's name against PosterRule (blacklist) as a case-insensitive substring match."""
     poster_name = (poster_name or "").strip()
-    poster_profile_url = (poster_profile_url or "").strip()
-
-    if not poster_name and not poster_profile_url:
+    if not poster_name:
         return True, ""  # couldn't detect a poster — fail open
 
-    rules = list(PosterRule.objects.all())
-    blacklist = [r for r in rules if r.list_type == "blacklist"]
-    whitelist = [r for r in rules if r.list_type == "whitelist"]
-
-    def matches(rule: PosterRule) -> bool:
-        if rule.poster_name and poster_name and rule.poster_name.strip().lower() in poster_name.lower():
-            return True
-        if (
-            rule.poster_profile_url
-            and poster_profile_url
-            and _normalize_url(rule.poster_profile_url) == _normalize_url(poster_profile_url)
-        ):
-            return True
-        return False
-
-    label = poster_name or poster_profile_url
-
-    for rule in blacklist:
-        if matches(rule):
-            return False, f"poster '{label}' is blacklisted"
-
-    if whitelist and not any(matches(rule) for rule in whitelist):
-        return False, f"poster '{label}' is not in the whitelist"
-
-    return True, ""
-
-
-def _normalize_url(url: str) -> str:
-    """Compare LinkedIn profile URLs by path only, so uk.linkedin.com/in/x
-    and www.linkedin.com/in/x (or http vs https) are treated as the same profile."""
-    path = urlparse(url.strip()).path.rstrip("/").lower()
-    return path or url.strip().lower()
-
-
-def _check_rules(value, rules, field_name, get_rule_value) -> tuple[bool, str]:
-    if value is None:
-        return True, ""  # couldn't detect — fail open
-
-    value_lower = value.strip().lower()
-    blacklist = [r for r in rules if r.list_type == "blacklist"]
-    whitelist = [r for r in rules if r.list_type == "whitelist"]
-
-    for rule in blacklist:
-        rule_value = get_rule_value(rule)
-        if rule_value and rule_value.lower() == value_lower:
-            return False, f"{field_name} '{value}' is blacklisted"
-
-    if whitelist and not any(
-        (rv := get_rule_value(rule)) and rv.lower() == value_lower for rule in whitelist
-    ):
-        return False, f"{field_name} '{value}' is not in the whitelist"
+    for rule in PosterRule.objects.all():
+        if rule.poster_name.strip().lower() in poster_name.lower():
+            return False, f"poster '{poster_name}' is blacklisted"
 
     return True, ""

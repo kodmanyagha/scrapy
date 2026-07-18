@@ -14,32 +14,6 @@ class Keyword(models.Model):
         return self.word
 
 
-class ScrapeConfig(models.Model):
-    """
-    Defines where to start/continue iterating LinkedIn job IDs.
-    There is normally only one row; the scraper always picks the latest one.
-    """
-
-    start_id = models.BigIntegerField(help_text="First LinkedIn job ID to check")
-    current_id = models.BigIntegerField(
-        help_text="Last ID that was checked (auto-updated)"
-    )
-    batch_size = models.IntegerField(
-        default=50, help_text="How many IDs to probe per run"
-    )
-    is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        ordering = ["-created_at"]
-        verbose_name = "Scrape Config"
-        verbose_name_plural = "Scrape Configs"
-
-    def __str__(self):
-        return f"Config #{self.pk} | start={self.start_id} | current={self.current_id}"
-
-
 class Job(models.Model):
     """A scraped LinkedIn job posting."""
 
@@ -65,10 +39,9 @@ class Job(models.Model):
     )
 
     poster_name = models.CharField(
-        max_length=200, blank=True, help_text="Name of the job poster/recruiter, if shown"
-    )
-    poster_profile_url = models.URLField(
-        max_length=600, blank=True, help_text="LinkedIn profile URL of the job poster, if shown"
+        max_length=200,
+        blank=True,
+        help_text="Name of the job poster, or the company if no individual recruiter is shown",
     )
 
     matched_keywords = models.ManyToManyField(Keyword, blank=True, related_name="jobs")
@@ -97,86 +70,58 @@ class Job(models.Model):
 
 
 class CountryRule(models.Model):
-    """Whitelist/blacklist entry for a country. Blacklist always wins over whitelist."""
-
-    LIST_TYPE_CHOICES = [
-        ("whitelist", "Whitelist (only allow)"),
-        ("blacklist", "Blacklist (always block)"),
-    ]
+    """A blacklisted country — jobs detected in this country are excluded. All other countries are allowed."""
 
     country = models.CharField(
         max_length=100,
+        unique=True,
         help_text='Country name as detected, e.g. "Turkey", "United States", "India"',
     )
-    list_type = models.CharField(max_length=10, choices=LIST_TYPE_CHOICES)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        unique_together = ("country", "list_type")
-        ordering = ["list_type", "country"]
-        verbose_name = "Country Rule"
-        verbose_name_plural = "Country Rules"
+        ordering = ["country"]
+        verbose_name = "Country Rule (blacklist)"
+        verbose_name_plural = "Country Rules (blacklist)"
 
     def __str__(self):
-        return f"{self.get_list_type_display()}: {self.country}"
+        return f"blacklist: {self.country}"
 
 
 class LanguageRule(models.Model):
-    """Whitelist/blacklist entry for a language. Blacklist always wins over whitelist."""
-
-    LIST_TYPE_CHOICES = [
-        ("whitelist", "Whitelist (only allow)"),
-        ("blacklist", "Blacklist (always block)"),
-    ]
+    """A whitelisted language — only jobs detected in one of these languages are allowed."""
 
     language_code = models.CharField(
-        max_length=10, help_text='ISO 639-1 code, e.g. "en", "tr"'
+        max_length=10, unique=True, help_text='ISO 639-1 code, e.g. "en", "tr"'
     )
-    list_type = models.CharField(max_length=10, choices=LIST_TYPE_CHOICES)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        unique_together = ("language_code", "list_type")
-        ordering = ["list_type", "language_code"]
-        verbose_name = "Language Rule"
-        verbose_name_plural = "Language Rules"
+        ordering = ["language_code"]
+        verbose_name = "Language Rule (whitelist)"
+        verbose_name_plural = "Language Rules (whitelist)"
 
     def __str__(self):
-        return f"{self.get_list_type_display()}: {self.language_code}"
+        return f"whitelist: {self.language_code}"
 
 
 class PosterRule(models.Model):
-    """
-    Whitelist/blacklist entry for a job poster (recruiter). Blacklist always
-    wins over whitelist. Match against either their name or LinkedIn profile
-    URL — whichever you provide.
-    """
-
-    LIST_TYPE_CHOICES = [
-        ("whitelist", "Whitelist (only allow)"),
-        ("blacklist", "Blacklist (always block)"),
-    ]
+    """A blacklisted job poster — matches as a case-insensitive substring of the poster name."""
 
     poster_name = models.CharField(
         max_length=200,
-        blank=True,
+        unique=True,
         help_text='Substring to match against the poster name, case-insensitive (e.g. "turing" matches "Turing Recruiting Team")',
     )
-    poster_profile_url = models.URLField(
-        max_length=600,
-        blank=True,
-        help_text="LinkedIn profile URL of the poster, e.g. https://www.linkedin.com/in/johndoe",
-    )
-    list_type = models.CharField(max_length=10, choices=LIST_TYPE_CHOICES)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ["list_type", "poster_name"]
-        verbose_name = "Poster Rule"
-        verbose_name_plural = "Poster Rules"
+        ordering = ["poster_name"]
+        verbose_name = "Poster Rule (blacklist)"
+        verbose_name_plural = "Poster Rules (blacklist)"
 
     def __str__(self):
-        return f"{self.get_list_type_display()}: {self.poster_name or self.poster_profile_url}"
+        return f"blacklist: {self.poster_name}"
 
 
 class ScrapeLog(models.Model):
@@ -188,9 +133,6 @@ class ScrapeLog(models.Model):
         ("failed", "Failed"),
     ]
 
-    config = models.ForeignKey(
-        ScrapeConfig, on_delete=models.CASCADE, related_name="logs"
-    )
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="running")
     id_from = models.BigIntegerField()
     id_to = models.BigIntegerField()
