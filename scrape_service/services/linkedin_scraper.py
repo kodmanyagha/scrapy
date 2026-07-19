@@ -29,7 +29,7 @@ from django.conf import settings
 from django.db import models
 from django.utils import timezone as django_tz
 
-from ..models import Job, Keyword, ScrapeLog
+from ..models import Job, Keyword, ScrapeLog, TitleKeyword
 from ..telegram import send_telegram_message, build_job_message
 from .detectors import check_filters, detect_country, detect_language
 
@@ -145,6 +145,7 @@ def run_scraper(start_id: int | None = None, limit: int | None = None) -> dict:
         job_id = last_id + 1
 
     keywords = list(Keyword.objects.values_list("word", flat=True))
+    title_keywords = list(TitleKeyword.objects.values_list("word", flat=True))
     stats = {"ids_checked": 0, "jobs_found": 0, "jobs_new": 0, "alerts_sent": 0}
 
     check_interval = getattr(settings, "SCRAPER_FRONTIER_CHECK_INTERVAL", 10)
@@ -158,7 +159,7 @@ def run_scraper(start_id: int | None = None, limit: int | None = None) -> dict:
         try:
             while limit is None or stats["ids_checked"] < limit:
                 logger.info("probing job_id=%s", job_id)
-                result = _probe_job_id(job_id, keywords)
+                result = _probe_job_id(job_id, keywords, title_keywords)
                 stats["ids_checked"] += 1
 
                 if result["exists"]:
@@ -247,7 +248,7 @@ def run_scraper(start_id: int | None = None, limit: int | None = None) -> dict:
 # ─── Internal helpers ─────────────────────────────────────────────────────────
 
 
-def _probe_job_id(job_id: int, keywords: list[str]) -> dict:
+def _probe_job_id(job_id: int, keywords: list[str], title_keywords: list[str]) -> dict:
     """
     Fetch a single LinkedIn job ID.
     Returns dict: {exists, is_new, alert_sent}
@@ -312,13 +313,19 @@ def _probe_job_id(job_id: int, keywords: list[str]) -> dict:
     # Check keywords
     full_text = f"{data['title']} {data['company']} {data['description']}"
     matched = _check_keywords(full_text, keywords)
+    title_matched = _check_keywords(data["title"], title_keywords)
 
     alert_sent = False
-    if matched:
-        logger.info("job_id=%s matched keywords: %s", job_id, matched)
-        kw_objects = Keyword.objects.filter(word__in=matched)
-        job.matched_keywords.set(kw_objects)
-        message = build_job_message(job, matched)
+    if matched or title_matched:
+        logger.info(
+            "job_id=%s matched keywords: %s, title keywords: %s",
+            job_id, matched, title_matched,
+        )
+        if matched:
+            job.matched_keywords.set(Keyword.objects.filter(word__in=matched))
+        if title_matched:
+            job.matched_title_keywords.set(TitleKeyword.objects.filter(word__in=title_matched))
+        message = build_job_message(job, matched + title_matched)
         logger.info("sending Telegram API request for job_id=%s", job_id)
         if send_telegram_message(message):
             job.telegram_sent = True

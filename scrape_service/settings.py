@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
+import logging
 import os
 from pathlib import Path
 
@@ -144,12 +145,32 @@ SCRAPER_FRONTIER_CHECK_INTERVAL = 10
 SCRAPER_CAUGHT_UP_WAIT_SECONDS = 30
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
+class _RelativePathFilter(logging.Filter):
+    """Adds `relpath` (pathname relative to BASE_DIR) to each log record."""
+
+    def filter(self, record):
+        record.relpath = os.path.relpath(record.pathname, BASE_DIR)
+        return True
+
+
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
+    "filters": {
+        "relative_path": {
+            "()": _RelativePathFilter,
+        },
+    },
+    "formatters": {
+        "verbose": {
+            "format": "%(asctime)s %(levelname)s %(relpath)s:%(lineno)d %(message)s",
+        },
+    },
     "handlers": {
         "console": {
             "class": "logging.StreamHandler",
+            "formatter": "verbose",
+            "filters": ["relative_path"],
         },
     },
     "loggers": {

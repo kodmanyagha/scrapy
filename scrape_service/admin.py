@@ -7,11 +7,18 @@ from .models import (
     LanguageRule,
     PosterRule,
     ScrapeLog,
+    TitleKeyword,
 )
 
 
 @admin.register(Keyword)
 class KeywordAdmin(admin.ModelAdmin):
+    list_display = ("id", "word", "created_at")
+    search_fields = ("word",)
+
+
+@admin.register(TitleKeyword)
+class TitleKeywordAdmin(admin.ModelAdmin):
     list_display = ("id", "word", "created_at")
     search_fields = ("word",)
 
@@ -38,9 +45,13 @@ class PosterRuleAdmin(admin.ModelAdmin):
 class JobAdmin(admin.ModelAdmin):
     list_display = (
         "id", "linkedin_id", "title", "company", "location", "country", "language",
-        "poster_name", "has_keyword_match", "is_filtered", "telegram_sent", "scraped_at",
+        "poster_name", "has_keyword_match", "has_title_keyword_match", "is_filtered",
+        "telegram_sent", "scraped_at",
     )
-    list_filter = ("telegram_sent", "is_filtered", "country", "language", "matched_keywords")
+    list_filter = (
+        "telegram_sent", "is_filtered", "country", "language",
+        "matched_keywords", "matched_title_keywords",
+    )
     search_fields = ("title", "company", "linkedin_id", "poster_name")
     readonly_fields = [f.name for f in Job._meta.fields]
     actions = ["blacklist_poster"]

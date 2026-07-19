@@ -14,6 +14,25 @@ class Keyword(models.Model):
         return self.word
 
 
+class TitleKeyword(models.Model):
+    """
+    Keywords to watch for in the job title only (not company/description). If a
+    job title contains any of these as a whole word, a Telegram alert is sent —
+    same trigger as Keyword, just scoped to the title.
+    """
+
+    word = models.CharField(max_length=100, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["word"]
+        verbose_name = "Title Keyword"
+        verbose_name_plural = "Title Keywords"
+
+    def __str__(self):
+        return self.word
+
+
 class Job(models.Model):
     """A scraped LinkedIn job posting."""
 
@@ -45,6 +64,9 @@ class Job(models.Model):
     )
 
     matched_keywords = models.ManyToManyField(Keyword, blank=True, related_name="jobs")
+    matched_title_keywords = models.ManyToManyField(
+        TitleKeyword, blank=True, related_name="jobs"
+    )
 
     is_filtered = models.BooleanField(
         default=False,
@@ -67,6 +89,10 @@ class Job(models.Model):
     @property
     def has_keyword_match(self):
         return self.matched_keywords.exists()
+
+    @property
+    def has_title_keyword_match(self):
+        return self.matched_title_keywords.exists()
 
 
 class CountryRule(models.Model):
